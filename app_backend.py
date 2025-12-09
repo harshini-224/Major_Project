@@ -7,7 +7,6 @@ from fastapi import FastAPI, Request, Form, HTTPException
 from fastapi.responses import Response, JSONResponse
 from twilio.twiml.voice_response import VoiceResponse
 from twilio.rest import Client
-from pyngrok import ngrok
 import uvicorn, time, os, json, pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler 
 from contextlib import asynccontextmanager 
@@ -439,3 +438,4 @@ async def get_public_url_api():
     """Endpoint for Streamlit to fetch the FastAPI URL"""
 
     return {"public_url": PUBLIC_URL}
+
