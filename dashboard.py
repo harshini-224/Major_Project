@@ -1,4 +1,4 @@
-%%writefile dashboard.py
+
 import streamlit as st
 import requests
 import pandas as pd
@@ -235,4 +235,5 @@ elif page == "Enroll New Patient":
 
 # Always show the backend connection status at the bottom (for debugging)
 st.sidebar.markdown("---")
+
 st.sidebar.caption(f"FastAPI Backend: {FASTAPI_BASE_URL}")
