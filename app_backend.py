@@ -37,7 +37,6 @@ def get_next_patient_id():
     new_id = f"P{PATIENT_ID_COUNTER}"
     PATIENT_ID_COUNTER += 1
     return new_id
-
 # --- LIFESPAN: Start/Stop Scheduler and ML Model ---
 
 # DUMMY/SYNTHETIC DATA GENERATION (Kept local for simplicity)
@@ -73,13 +72,27 @@ def train_ml_model():
 async def lifespan(app: FastAPI):
     global GLOBAL_MODEL, GLOBAL_EXPLAINER, PUBLIC_URL
     
-    # 1. Ngrok is ONLY needed for local development. We skip it in deployment.
-    if os.environ.get("DEPLOY_ENV", "local") == "local":
-        ngrok_tunnel = ngrok.connect(8000)
-        PUBLIC_URL = ngrok_tunnel.public_url
+    # 1. Determine the Public URL based on the environment
+    # RENDER_EXTERNAL_HOSTNAME is set automatically by Render for the public URL
+    if os.environ.get("RENDER_EXTERNAL_HOSTNAME"):
+        # We are on Render (Production)
+        # PUBLIC_URL MUST use HTTPS and the hostname provided by Render
+        PUBLIC_URL = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}"
+        print(f"Deployment mode: Using Render URL {PUBLIC_URL}")
+        
     else:
-        # In deployment (e.g., Render), the PUBLIC_URL is the host's URL
-        PUBLIC_URL = "http://localhost:8000" # Use a placeholder for internal calls
+        # We are running locally (Development)
+        try:
+            # Conditional import of pyngrok to avoid issues on Render 
+            # and use it for local development only.
+            from pyngrok import ngrok 
+            ngrok_tunnel = ngrok.connect(8000)
+            PUBLIC_URL = ngrok_tunnel.public_url
+            print(f"Development mode: Ngrok tunnel started at {PUBLIC_URL}")
+        except Exception as e:
+            # Fallback if ngrok fails locally (e.g., missing authtoken)
+            print(f"Ngrok connection failed, proceeding with local URL. Error: {e}")
+            PUBLIC_URL = "http://localhost:8000"
 
     print("\n" + "="*70)
     print("FastAPI Backend Starting...")
@@ -99,9 +112,17 @@ async def lifespan(app: FastAPI):
 
     # 4. Stop Scheduler and Ngrok on Shutdown
     scheduler.shutdown()
-    if os.environ.get("DEPLOY_ENV", "local") == "local":
-        ngrok.disconnect(PUBLIC_URL)
+    
+    # Only try to clean up ngrok if we were running locally
+    if not os.environ.get("RENDER_EXTERNAL_HOSTNAME"):
+        try:
+            # Add cleanup logic if needed for local development
+            print("Cleanup: Local environment shutdown complete.")
+        except:
+            pass 
+
     print("Backend shutting down.")
+
 
 app = FastAPI(lifespan=lifespan)
 
@@ -416,4 +437,5 @@ async def manual_call_trigger():
 @app.get("/get_public_url")
 async def get_public_url_api():
     """Endpoint for Streamlit to fetch the FastAPI URL"""
+
     return {"public_url": PUBLIC_URL}
