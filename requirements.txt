@@ -9,5 +9,5 @@ scikit-learn
 shap
 pytz
 twilio
-pyngrok
 python-multipart
+
