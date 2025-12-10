@@ -196,6 +196,7 @@ def update_patient_fields(patient_id, updated_patient_dict):
     
     cursor = conn.cursor()
     
+    # Ensure latest_report is safely accessed before json.dumps
     latest_report = updated_patient_dict['daily_reports_log'][0] if updated_patient_dict.get('daily_reports_log') else {}
 
     current_report_json = json.dumps(latest_report)
@@ -277,8 +278,7 @@ def load_sample_patients():
     history.sort(key=lambda x: x['date'], reverse=True)
     current_report = history[0]
 
-    # NOTE: YOU MUST REPLACE THE PLACEHOLDER PHONE NUMBERS (+91...) with numbers you can use for testing Twilio calls!
-    # These numbers MUST be in E.164 format for the IVR lookup to work
+    # NOTE: REPLACE THE PLACEHOLDER PHONE NUMBERS (+91...) with numbers you can use for testing Twilio calls!
     sample_data_list = [
         # --- Stable Patient ---
         {"id": "P1001", "phone": "+919900000001", "name": "Rajesh Kumar", "age": 75, "prior_admissions_30d": 2, 
@@ -506,11 +506,13 @@ def perform_nlp_and_risk_update(patient_id, symptoms_text, adherence_text):
     patient['shap_explanation'] = shap_explanation
     patient['last_call'] = new_report['date']
 
-    update_patient_fields(patient_id, patient)
-
-    if risk_level == "High":
-        print(f"\n🚨🚨 CRITICAL ALERT: Patient {patient['name']} (ID: {patient_id}) - RISK: {risk_level} ({risk_prob*100:.1f}%)")
-    return patient
+    if update_patient_fields(patient_id, patient):
+        if risk_level == "High":
+            print(f"\n🚨🚨 CRITICAL ALERT: Patient {patient['name']} (ID: {patient_id}) - RISK: {risk_level} ({risk_prob*100:.1f}%)")
+        return patient
+    else:
+        print(f"FATAL: Database update failed for patient {patient_id}.")
+        return None
 
 # --- 4) IVR Endpoints (Twilio Webhooks) ---
 
@@ -529,7 +531,6 @@ def enqueue_symptoms(state, symptoms_list):
 async def twilio_webhook(request: Request, Caller: str = Form(None), CallSid: str = Form(None)):
     
     # CRITICAL: Clean the caller ID to ensure it matches the stored E.164 format
-    # This addresses common database/Twilio mismatches
     normalized_caller = Caller.strip()
     
     patient_id, patient = get_patient_context(normalized_caller) 
@@ -587,7 +588,8 @@ async def process_adherence(request: Request, SpeechResult: str = Form(None), Ca
     current_q = current_symptom_item["questions"][current_symptom_item["q_index"]]
     
     gather = response.gather(input='speech', action=f'{PUBLIC_URL}/twilio/process_answer', timeout=10)
-    gather.say(f"Okay, let's ask a few questions about your {current_symptom_item['name']}. {current_q}")
+    response.say(f"Okay, let's ask a few questions about your {current_symptom_item['name']}.")
+    gather.say(current_q)
     return Response(content=str(response), media_type="application/xml")
 
 @app.post("/twilio/process_answer")
@@ -605,33 +607,51 @@ async def process_answer(request: Request, SpeechResult: str = Form(None), Calle
         symptom_item["answer_log"].append({"question": current_q, "answer": answer_text})
         symptom_item["q_index"] += 1
         
+        # Check for more questions for the current symptom
         if symptom_item["q_index"] < len(symptom_item["questions"]):
             next_q = symptom_item["questions"][symptom_item["q_index"]]
             gather = response.gather(input='speech', action=f'{PUBLIC_URL}/twilio/process_answer', timeout=10)
             gather.say(f"Next question about {symptom_item['name']}: {next_q}")
             return Response(content=str(response), media_type="application/xml")
             
+        # Move to the next symptom
         state["current_symptom_index"] += 1
         
+    # Check if there are still more symptoms to ask about
     if state["current_symptom_index"] < len(state["symptoms"]):
         next_item = state["symptoms"][state["current_symptom_index"]]
         next_q = next_item["questions"][next_item["q_index"]]
         gather = response.gather(input='speech', action=f'{PUBLIC_URL}/twilio/process_answer', timeout=10)
-        gather.say(f"Now, about your {next_item['name']}. {next_q}")
+        response.say(f"Thank you for that. Now, we will move to questions about your {next_item['name']}.")
+        gather.say(next_q)
         return Response(content=str(response), media_type="application/xml")
         
+    # --- FINAL STEP: Process Data and Save to DB ---
+    
+    # 1. Compile the full symptom report text
     full_symptom_report = f"Initial: {state['symptoms_text_log']}"
     for item in state['symptoms']:
         for log in item['answer_log']:
             full_symptom_report += f" | {item['name']} Follow-up: {log['answer']}"
             
+    # 2. Run ML/NLP, Update Patient Object, and Write to DB
     updated_patient = perform_nlp_and_risk_update(state['id'], full_symptom_report, state['adherence_text_log']) 
     
+    # 3. CRITICAL: Check if the update was successful
+    if updated_patient is None:
+        response.say("A critical error occurred while saving your report. Please contact your doctor.")
+        response.hangup()
+        CALL_STATES.pop(CallSid, None)
+        return Response(content=str(response), media_type="application/xml")
+    
+    # 4. Final success response
     response.say("Thank you for answering all the questions. Your information is now updated.")
-    if updated_patient and updated_patient['risk_level'] == "High":
+    if updated_patient['risk_level'] == "High":
         response.say("Your doctor has been immediately alerted to review your critical report.")
     response.say("Goodbye.")
     response.hangup()
+    
+    # Cleanup session state
     CALL_STATES.pop(CallSid, None)
     return Response(content=str(response), media_type="application/xml")
 
@@ -715,6 +735,29 @@ async def log_intervention_api(patient_id: str, notes: Request):
     print(f"\n👨‍⚕️ INTERVENTION LOGGED for {patient['name']}")
     return {"status": "success", "patient_id": patient_id, "message": "Intervention logged."}
 
+@app.delete("/api/patients/delete/{patient_id}")
+async def delete_patient_api(patient_id: str):
+    """Deletes a patient and all associated data from the database."""
+    conn = GLOBAL_DB_CONNECTION
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection error.")
+    
+    cursor = conn.cursor()
+    
+    patient_id_found, _ = get_patient_context(patient_id, by_phone=False)
+    if not patient_id_found:
+        raise HTTPException(status_code=404, detail=f"Patient ID {patient_id} not found.")
+
+    try:
+        cursor.execute("DELETE FROM patients WHERE id = ?", (patient_id,))
+        conn.commit()
+        
+        print(f"\n🗑️ Patient DELETED: {patient_id}")
+        return {"status": "success", "patient_id": patient_id, "message": "Patient deleted successfully."}
+    except Exception as e:
+        print(f"DB Deletion Error for {patient_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete patient record.")
+
 
 # --- 7) Scheduling and Server Control ---
 def call_patient(patient_id, phone_number):
@@ -735,25 +778,41 @@ def call_patient(patient_id, phone_number):
 def call_patients_job():
     print(f"\n--- Running Daily Automated Call Job @ {datetime.now().strftime('%H:%M:%S')} ---")
     all_patients = get_all_patients_data() 
-    
+        
     if not all_patients:
         print("No patients enrolled in the system.")
         return
         
     for patient in all_patients:
-        # TEMPORARY FIX: Comment out the risk check to test the IVR immediately
-        # The automated call job should be restricted in a real deployment
-        # if patient.get('risk_level', 'Low') == 'Low' and not patient.get('doctor_override', False):
-        call_patient(patient['id'], patient['phone'])
-        # else:
-        #     print(f"Skipping automated call for {patient['name']}. Status: Risk={patient.get('risk_level', 'Low')}, Override={patient.get('doctor_override', False)}")
+        # Automated job logic: Only call if risk is Medium/High or Doctor override is active
+        if patient.get('risk_level', 'Low') in ('Medium', 'High') or patient.get('doctor_override', False):
+            call_patient(patient['id'], patient['phone'])
+        else:
+            print(f"Skipping automated call for {patient['name']}. Status: Risk={patient.get('risk_level', 'Low')}, Override={patient.get('doctor_override', False)}")
             
     return {"status": "job_completed", "count": len(all_patients)}
 
 @app.post("/call_patients_job_manual")
 async def manual_call_trigger():
+    # This is the bulk call trigger from the Monitoring Job Control section
     result = call_patients_job()
     return JSONResponse(content=result)
+
+@app.post("/call_patient_manual/{patient_id}")
+async def manual_call_single_patient(patient_id: str):
+    """Triggers an IVR call for a single, specific patient."""
+    
+    _, patient = get_patient_context(patient_id, by_phone=False)
+    
+    if not patient:
+        raise HTTPException(status_code=404, detail=f"Patient ID {patient_id} not found.")
+
+    phone_number = patient['phone']
+    call_patient(patient_id, phone_number)
+    
+    print(f"\n📞 MANUAL CALL TRIGGERED for {patient['name']} (ID: {patient_id})")
+    
+    return {"status": "call_initiated", "patient_id": patient_id, "phone": phone_number}
 
 @app.get("/get_public_url")
 async def get_public_url_api():
@@ -761,4 +820,3 @@ async def get_public_url_api():
     if not PUBLIC_URL or PUBLIC_URL == "http://localhost:8000":
          raise HTTPException(status_code=503, detail="Public URL is not ready. Check deployment or Ngrok status.")
     return {"public_url": PUBLIC_URL}
-
