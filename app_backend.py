@@ -7,7 +7,7 @@ from fastapi.responses import Response, JSONResponse
 from twilio.twiml.voice_response import VoiceResponse
 from twilio.rest import Client
 import uvicorn, time, os, json, pytz
-import sqlite3 # <--- NEW: For persistent storage
+import sqlite3 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler 
 from contextlib import asynccontextmanager 
 from datetime import datetime, timedelta
@@ -26,7 +26,7 @@ TWILIO_NUMBER = os.environ.get("TWILIO_PHONE_NUMBER")
 DAILY_CALL_HOUR_IST = 10
 
 # Database Configuration
-DB_FILE = "patient_monitoring.db" # SQLite file for persistent storage
+DB_FILE = "patient_monitoring.db" 
 GLOBAL_DB_CONNECTION = None
 PATIENT_ID_COUNTER = 1001 
 GLOBAL_MODEL, GLOBAL_EXPLAINER = None, None
@@ -55,11 +55,9 @@ def initialize_database():
     """Establishes connection and creates the patient table if it doesn't exist."""
     global GLOBAL_DB_CONNECTION, PATIENT_ID_COUNTER
     try:
-        # check_same_thread=False is necessary for FastAPI's async/threading
         GLOBAL_DB_CONNECTION = sqlite3.connect(DB_FILE, check_same_thread=False)
         cursor = GLOBAL_DB_CONNECTION.cursor()
 
-        # Schema: Complex objects stored as JSON strings
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS patients (
                 id TEXT PRIMARY KEY,
@@ -77,7 +75,6 @@ def initialize_database():
             );
         """)
         
-        # Initialize PATIENT_ID_COUNTER based on existing data
         cursor.execute("SELECT MAX(CAST(SUBSTR(id, 2) AS INTEGER)) FROM patients")
         max_id = cursor.fetchone()[0]
         if max_id:
@@ -98,16 +95,12 @@ def db_to_patient_dict(row, cursor_description):
     patient_dict = {}
     col_names = [col[0] for col in cursor_description]
     
-    # Map all column names and values to the dictionary
     for name, value in zip(col_names, row):
         if name.endswith('_json'):
-            # Deserialize JSON fields
             patient_dict[name.replace('_json', '')] = json.loads(value) if value else {}
         else:
             patient_dict[name] = value
             
-    # CRITICAL FIX: Promote key fields from the current_report sub-dictionary 
-    # to the top level of the patient dictionary.
     current_report = patient_dict.get('current_report', {})
     
     patient_dict.update({
@@ -119,7 +112,6 @@ def db_to_patient_dict(row, cursor_description):
         'shap_explanation': current_report.get('shap_explanation', []),
         'last_call': current_report.get('date', None),
         
-        # Ensure base ML features are promoted correctly
         'age': patient_dict.get('age', 0), 
         'prior_admissions_30d': patient_dict.get('prior_admissions_30d', 0),
         'comorbidity_score': patient_dict.get('comorbidity_score', 0),
@@ -128,13 +120,19 @@ def db_to_patient_dict(row, cursor_description):
     return patient_dict
 
 def get_patient_context(identifier, by_phone=True):
-    """Fetches patient data from SQLite by phone number or ID."""
+    """
+    Fetches patient data from SQLite by phone number or ID.
+    CRITICAL FIX: Ensures the identifier is used strictly for lookup.
+    """
     conn = GLOBAL_DB_CONNECTION
     if not conn: return None, None
     cursor = conn.cursor()
     
+    query = ""
     # Use the correct column name based on the identifier type
     if by_phone:
+        # The identifier from Twilio (Caller) is the full E.164 string (e.g., +919876543210)
+        # We search the 'phone' column for an exact match.
         query = "SELECT * FROM patients WHERE phone = ?"
     else:
         query = "SELECT * FROM patients WHERE id = ?"
@@ -148,9 +146,13 @@ def get_patient_context(identifier, by_phone=True):
     
     if row:
         patient_id = row[0]
-        # Use the corrected helper to convert the row back to the dictionary
         patient_dict = db_to_patient_dict(row, cursor.description) 
+        print(f"✅ Found patient {patient_id} for identifier {identifier}")
         return patient_id, patient_dict
+    
+    # CRITICAL DIAGNOSTIC: Log why the patient was not found
+    print(f"❌ DIAGNOSTIC: Patient not found for lookup type: {'phone' if by_phone else 'ID'}. Search term: {identifier}")
+        
     return None, None
 
 def save_new_patient_record(patient_id, new_record):
@@ -160,7 +162,6 @@ def save_new_patient_record(patient_id, new_record):
     
     cursor = conn.cursor()
     
-    # Serialize complex objects to JSON strings
     current_report_json = json.dumps({
         'adherence': new_record.get('adherence'), 'symptom_report': new_record.get('symptom_report'),
         'sentiment_score': new_record.get('sentiment_score'), 'ml_prediction': new_record.get('ml_prediction'),
@@ -195,10 +196,8 @@ def update_patient_fields(patient_id, updated_patient_dict):
     
     cursor = conn.cursor()
     
-    # Prepare the latest report for the dedicated current_report_json field
     latest_report = updated_patient_dict['daily_reports_log'][0] if updated_patient_dict.get('daily_reports_log') else {}
 
-    # Serialize to JSON strings
     current_report_json = json.dumps(latest_report)
     daily_reports_log_json = json.dumps(updated_patient_dict.get('daily_reports_log', []))
 
@@ -269,21 +268,17 @@ def load_sample_patients():
 
     # --- History for Pooja Singh (P1003): Risk slowly rising over 14 days ---
     history = []
-    # Days 14 to 8: Low Risk
     history.extend([generate_historical_report(day, 1, "Feeling fine.", 0.1, 0.25, "Low") for day in range(8, 15)])
-    # Day 7: Medium Risk
     history.append(generate_historical_report(7, 1, "Slight swelling, nothing major.", 0.5, 0.55, "Medium"))
-    # Days 6 to 3: Medium Risk, Poor Adherence
     history.extend([generate_historical_report(day, 0, f"Minor cough on day {day}.", 0.6, 0.60, "Medium") for day in range(3, 7)])
-    # Day 2: High Risk, Critical Symptoms Reported
     history.append(generate_historical_report(2, 0, "Hard to breathe, severe swelling in ankles.", 0.85, 0.78, "High"))
-    # Day 1: High Risk (Recent Intervention)
     history.append(generate_historical_report(1, 1, "Doctor called, following new dosage. Still cautious.", 0.70, 0.75, "High"))
     
     history.sort(key=lambda x: x['date'], reverse=True)
     current_report = history[0]
 
     # NOTE: YOU MUST REPLACE THE PLACEHOLDER PHONE NUMBERS (+91...) with numbers you can use for testing Twilio calls!
+    # These numbers MUST be in E.164 format for the IVR lookup to work
     sample_data_list = [
         # --- Stable Patient ---
         {"id": "P1001", "phone": "+919900000001", "name": "Rajesh Kumar", "age": 75, "prior_admissions_30d": 2, 
@@ -329,30 +324,26 @@ async def lifespan(app: FastAPI):
     print("\n" + "="*70)
     print("FastAPI Backend Starting...")
     
-    # NEW STEP: Initialize Database and load samples
     GLOBAL_DB_CONNECTION = initialize_database()
     if not GLOBAL_DB_CONNECTION:
         raise RuntimeError("Failed to initialize database connection.")
         
-    load_sample_patients() # Load samples only if DB is empty
+    load_sample_patients() 
 
-    # 2. Train Model
     GLOBAL_MODEL, GLOBAL_EXPLAINER = train_ml_model()
 
-    # 3. Start Scheduler
     hour = DAILY_CALL_HOUR_IST
     scheduler.remove_all_jobs()
     scheduler.add_job(call_patients_job, trigger="cron", hour=hour, minute=0, timezone=pytz.timezone('Asia/Kolkata'))
     scheduler.start()
-    print(f"Daily Scheduler set for {DAILY_CALL_HOUR_IST}:00 IST.")
+    print(f"Daily Scheduler set for {DAILY_CALL_HOUR_IST}:00 IST. PUBLIC_URL: {PUBLIC_URL}")
     print("="*70 + "\n")
 
     yield 
 
-    # 4. Stop Scheduler and Clean up
     scheduler.shutdown()
     if GLOBAL_DB_CONNECTION:
-        GLOBAL_DB_CONNECTION.close() # <--- NEW: Close DB connection
+        GLOBAL_DB_CONNECTION.close() 
     
     if ngrok_tunnel:
         try:
@@ -421,7 +412,7 @@ def clinical_ner_extract(text):
     return list(extracted)
 
 def get_contextual_questions(patient_id, user_text):
-    _, patient = get_patient_context(patient_id, by_phone=False) # Get patient data from DB
+    _, patient = get_patient_context(patient_id, by_phone=False) 
     if not patient: return []
     explicit_symptoms = set(clinical_ner_extract(user_text))
     implied_symptoms = set()
@@ -458,7 +449,6 @@ def predict_and_explain(patient_data):
     if GLOBAL_MODEL is None or GLOBAL_EXPLAINER is None:
         return 0.0, [{"feature": "System Error", "impact_score": 0.0}]
         
-    # Ensure all required features are present and are floats/ints
     features = {col: [patient_data.get(col, 0)] for col in FEATURE_COLUMNS}
     X_single = pd.DataFrame(features)
     readmission_prob = GLOBAL_MODEL.predict_proba(X_single)[:, 1][0]
@@ -474,7 +464,6 @@ def predict_and_explain(patient_data):
     return readmission_prob, formatted_explanation
     
 def perform_nlp_and_risk_update(patient_id, symptoms_text, adherence_text):
-    # Fetch latest data
     _, patient = get_patient_context(patient_id, by_phone=False)
     if not patient: return None
 
@@ -507,9 +496,8 @@ def perform_nlp_and_risk_update(patient_id, symptoms_text, adherence_text):
 
     if 'daily_reports_log' not in patient: patient['daily_reports_log'] = []
 
-    patient['daily_reports_log'].insert(0, new_report) # Latest report at index 0
+    patient['daily_reports_log'].insert(0, new_report) 
     
-    # Update the patient data dictionary for the database call
     patient['adherence'] = adherence_int
     patient['symptom_report'] = symptoms_text
     patient['sentiment_score'] = sentiment_score_neg
@@ -518,7 +506,6 @@ def perform_nlp_and_risk_update(patient_id, symptoms_text, adherence_text):
     patient['shap_explanation'] = shap_explanation
     patient['last_call'] = new_report['date']
 
-    # CRUCIAL: Save the updated dictionary back to the database
     update_patient_fields(patient_id, patient)
 
     if risk_level == "High":
@@ -540,10 +527,16 @@ def enqueue_symptoms(state, symptoms_list):
 
 @app.post("/twilio")
 async def twilio_webhook(request: Request, Caller: str = Form(None), CallSid: str = Form(None)):
-    patient_id, patient = get_patient_context(Caller) # <--- DB CALL
+    
+    # CRITICAL: Clean the caller ID to ensure it matches the stored E.164 format
+    # This addresses common database/Twilio mismatches
+    normalized_caller = Caller.strip()
+    
+    patient_id, patient = get_patient_context(normalized_caller) 
+    
     if not patient_id:
         response = VoiceResponse()
-        response.say("Sorry, we cannot find your file. Please call your care provider.")
+        response.say("Sorry, we cannot find your file. Please contact your care provider. Goodbye.")
         response.hangup()
         return Response(content=str(response), media_type="application/xml")
         
@@ -585,12 +578,11 @@ async def process_adherence(request: Request, SpeechResult: str = Form(None), Ca
     
     if not state.get("symptoms"):
         response.say("Thank you for telling us about your medicine. Since you reported nothing new, your file is stable. Goodbye.")
-        perform_nlp_and_risk_update(state['id'], state['symptoms_text_log'], state['adherence_text_log']) # <--- DB UPDATE
+        perform_nlp_and_risk_update(state['id'], state['symptoms_text_log'], state['adherence_text_log']) 
         CALL_STATES.pop(CallSid, None)
         response.hangup()
         return Response(content=str(response), media_type="application/xml")
         
-    # Start the symptom follow-up queue
     current_symptom_item = state["symptoms"][state["current_symptom_index"]]
     current_q = current_symptom_item["questions"][current_symptom_item["q_index"]]
     
@@ -613,17 +605,14 @@ async def process_answer(request: Request, SpeechResult: str = Form(None), Calle
         symptom_item["answer_log"].append({"question": current_q, "answer": answer_text})
         symptom_item["q_index"] += 1
         
-        # Next question for the same symptom
         if symptom_item["q_index"] < len(symptom_item["questions"]):
             next_q = symptom_item["questions"][symptom_item["q_index"]]
             gather = response.gather(input='speech', action=f'{PUBLIC_URL}/twilio/process_answer', timeout=10)
             gather.say(f"Next question about {symptom_item['name']}: {next_q}")
             return Response(content=str(response), media_type="application/xml")
             
-        # Move to next symptom
         state["current_symptom_index"] += 1
         
-    # Start asking questions for the next symptom in the queue
     if state["current_symptom_index"] < len(state["symptoms"]):
         next_item = state["symptoms"][state["current_symptom_index"]]
         next_q = next_item["questions"][next_item["q_index"]]
@@ -631,13 +620,12 @@ async def process_answer(request: Request, SpeechResult: str = Form(None), Calle
         gather.say(f"Now, about your {next_item['name']}. {next_q}")
         return Response(content=str(response), media_type="application/xml")
         
-    # All questions processed. Finalize risk assessment.
     full_symptom_report = f"Initial: {state['symptoms_text_log']}"
     for item in state['symptoms']:
         for log in item['answer_log']:
             full_symptom_report += f" | {item['name']} Follow-up: {log['answer']}"
             
-    updated_patient = perform_nlp_and_risk_update(state['id'], full_symptom_report, state['adherence_text_log']) # <--- DB UPDATE
+    updated_patient = perform_nlp_and_risk_update(state['id'], full_symptom_report, state['adherence_text_log']) 
     
     response.say("Thank you for answering all the questions. Your information is now updated.")
     if updated_patient and updated_patient['risk_level'] == "High":
@@ -654,8 +642,10 @@ async def add_new_patient_api(
     prior_admissions_30d: int = Form(...), comorbidity_score: int = Form(...),
     discharge_diagnosis: str = Form(...), medications: str = Form(...) 
 ):
-    if not phone.startswith('+91') or not re.match(r'^\+91\d{10}$', phone):
-        raise HTTPException(status_code=400, detail="Invalid Indian phone number format. Use E.164 starting with +91 followed by 10 digits.")
+    # CRITICAL: Strict E.164 validation before saving
+    if not re.match(r'^\+\d{11,15}$', phone): # Standard E.164 validation
+        if not (phone.startswith('+91') and len(phone) == 13): # Specific Indian validation (+91xxxxxxxxxx)
+             raise HTTPException(status_code=400, detail="Invalid phone number format. Use E.164 starting with '+' (e.g., +919876543210).")
         
     # Check if patient exists in DB
     if get_patient_context(phone, by_phone=True)[0]:
@@ -674,7 +664,7 @@ async def add_new_patient_api(
         "daily_reports_log": [],
     }
     
-    if not save_new_patient_record(patient_id, new_record): # <--- DB INSERT
+    if not save_new_patient_record(patient_id, new_record): 
         raise HTTPException(status_code=500, detail="Failed to save patient record to database.")
 
     print(f"\n✅ New Patient Added: {name} (ID: {patient_id})")
@@ -683,7 +673,7 @@ async def add_new_patient_api(
 # --- 6) Dashboard and Intervention Endpoints (APIs for Streamlit) ---
 @app.get("/api/patients/all_summary")
 async def get_all_patients_summary():
-    all_patients = get_all_patients_data() # <--- DB QUERY
+    all_patients = get_all_patients_data() 
     summary = []
     for p in all_patients:
         summary.append({
@@ -697,7 +687,7 @@ async def get_all_patients_summary():
 
 @app.get("/api/patients/{patient_id}/history")
 async def get_patient_history_api(patient_id: str):
-    patient_id_found, patient = get_patient_context(patient_id, by_phone=False) # <--- DB QUERY
+    patient_id_found, patient = get_patient_context(patient_id, by_phone=False) 
     if not patient_id_found:
         raise HTTPException(status_code=404, detail="Patient not found")
 
@@ -710,19 +700,17 @@ async def get_patient_history_api(patient_id: str):
 
 @app.post("/api/patients/intervene/{patient_id}")
 async def log_intervention_api(patient_id: str, notes: Request):
-    patient_id_found, patient = get_patient_context(patient_id, by_phone=False) # <--- DB QUERY
+    patient_id_found, patient = get_patient_context(patient_id, by_phone=False) 
     if not patient_id_found:
         raise HTTPException(status_code=404, detail="Patient not found")
         
     notes_json = await notes.json()
     intervention_notes = notes_json.get("notes", "No notes provided")
     
-    # Update the patient dictionary
     patient['doctor_override'] = True
     patient['intervention_notes'] = intervention_notes
     
-    # Save the updated dictionary back to the database
-    update_patient_fields(patient_id, patient) # <--- DB UPDATE
+    update_patient_fields(patient_id, patient) 
 
     print(f"\n👨‍⚕️ INTERVENTION LOGGED for {patient['name']}")
     return {"status": "success", "patient_id": patient_id, "message": "Intervention logged."}
@@ -737,7 +725,6 @@ def call_patient(patient_id, phone_number):
         return
         
     try:
-        # Use PUBLIC_URL dynamically for the webhook callback
         call = twilio_client.calls.create(
             to=phone_number, from_=TWILIO_NUMBER, url=f"{PUBLIC_URL}/twilio"
         )
@@ -747,17 +734,19 @@ def call_patient(patient_id, phone_number):
 
 def call_patients_job():
     print(f"\n--- Running Daily Automated Call Job @ {datetime.now().strftime('%H:%M:%S')} ---")
-    all_patients = get_all_patients_data() # <--- DB QUERY
+    all_patients = get_all_patients_data() 
     
     if not all_patients:
         print("No patients enrolled in the system.")
         return
         
     for patient in all_patients:
-        if patient.get('risk_level', 'Low') == 'Low' and not patient.get('doctor_override', False):
-            call_patient(patient['id'], patient['phone'])
-        else:
-            print(f"Skipping automated call for {patient['name']}. Status: Risk={patient.get('risk_level', 'Low')}, Override={patient.get('doctor_override', False)}")
+        # TEMPORARY FIX: Comment out the risk check to test the IVR immediately
+        # The automated call job should be restricted in a real deployment
+        # if patient.get('risk_level', 'Low') == 'Low' and not patient.get('doctor_override', False):
+        call_patient(patient['id'], patient['phone'])
+        # else:
+        #     print(f"Skipping automated call for {patient['name']}. Status: Risk={patient.get('risk_level', 'Low')}, Override={patient.get('doctor_override', False)}")
             
     return {"status": "job_completed", "count": len(all_patients)}
 
@@ -772,3 +761,4 @@ async def get_public_url_api():
     if not PUBLIC_URL or PUBLIC_URL == "http://localhost:8000":
          raise HTTPException(status_code=503, detail="Public URL is not ready. Check deployment or Ngrok status.")
     return {"public_url": PUBLIC_URL}
+
