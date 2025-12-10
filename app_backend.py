@@ -97,14 +97,19 @@ def db_to_patient_dict(row, cursor_description):
     
     patient_dict = {}
     col_names = [col[0] for col in cursor_description]
+    
+    # Map all column names and values to the dictionary
     for name, value in zip(col_names, row):
         if name.endswith('_json'):
+            # Deserialize JSON fields
             patient_dict[name.replace('_json', '')] = json.loads(value) if value else {}
         else:
             patient_dict[name] = value
-
-    # Extract current risk/adherence fields from current_report for direct access
+            
+    # CRITICAL FIX: Promote key fields from the current_report sub-dictionary 
+    # to the top level of the patient dictionary.
     current_report = patient_dict.get('current_report', {})
+    
     patient_dict.update({
         'adherence': current_report.get('adherence', 1),
         'symptom_report': current_report.get('symptom_report', 'New Patient Enrolled.'),
@@ -113,6 +118,11 @@ def db_to_patient_dict(row, cursor_description):
         'risk_level': current_report.get('risk_level', 'Low'),
         'shap_explanation': current_report.get('shap_explanation', []),
         'last_call': current_report.get('date', None),
+        
+        # Ensure base ML features are promoted correctly
+        'age': patient_dict.get('age', 0), 
+        'prior_admissions_30d': patient_dict.get('prior_admissions_30d', 0),
+        'comorbidity_score': patient_dict.get('comorbidity_score', 0),
     })
     
     return patient_dict
@@ -123,17 +133,23 @@ def get_patient_context(identifier, by_phone=True):
     if not conn: return None, None
     cursor = conn.cursor()
     
+    # Use the correct column name based on the identifier type
     if by_phone:
         query = "SELECT * FROM patients WHERE phone = ?"
     else:
         query = "SELECT * FROM patients WHERE id = ?"
         
-    cursor.execute(query, (identifier,))
-    row = cursor.fetchone()
+    try:
+        cursor.execute(query, (identifier,))
+        row = cursor.fetchone()
+    except Exception as e:
+        print(f"DB Lookup Error: {e}")
+        return None, None
     
     if row:
         patient_id = row[0]
-        patient_dict = db_to_patient_dict(row, cursor.description)
+        # Use the corrected helper to convert the row back to the dictionary
+        patient_dict = db_to_patient_dict(row, cursor.description) 
         return patient_id, patient_dict
     return None, None
 
@@ -182,6 +198,10 @@ def update_patient_fields(patient_id, updated_patient_dict):
     # Prepare the latest report for the dedicated current_report_json field
     latest_report = updated_patient_dict['daily_reports_log'][0] if updated_patient_dict.get('daily_reports_log') else {}
 
+    # Serialize to JSON strings
+    current_report_json = json.dumps(latest_report)
+    daily_reports_log_json = json.dumps(updated_patient_dict.get('daily_reports_log', []))
+
     sql = """UPDATE patients SET
         doctor_override = ?,
         intervention_notes = ?,
@@ -193,8 +213,8 @@ def update_patient_fields(patient_id, updated_patient_dict):
         cursor.execute(sql, (
             int(updated_patient_dict['doctor_override']),
             updated_patient_dict['intervention_notes'],
-            json.dumps(latest_report), 
-            json.dumps(updated_patient_dict['daily_reports_log']),
+            current_report_json, 
+            daily_reports_log_json,
             patient_id
         ))
         conn.commit()
@@ -263,6 +283,7 @@ def load_sample_patients():
     history.sort(key=lambda x: x['date'], reverse=True)
     current_report = history[0]
 
+    # NOTE: YOU MUST REPLACE THE PLACEHOLDER PHONE NUMBERS (+91...) with numbers you can use for testing Twilio calls!
     sample_data_list = [
         # --- Stable Patient ---
         {"id": "P1001", "phone": "+919900000001", "name": "Rajesh Kumar", "age": 75, "prior_admissions_30d": 2, 
@@ -344,7 +365,6 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 # --- 2) CLINICAL KNOWLEDGE BASE & IVR HELPERS ---
-# ... (CLINICAL_QUESTIONS and helper functions remain unchanged) ...
 CLINICAL_QUESTIONS = {
     "shortness of breath": ["Are you finding it hard to breathe when you are resting?", "Do you have to sit up to sleep because of your breathing?"],
     "swelling": ["Have your feet, ankles, or legs gotten bigger or more swollen?", "How much heavier do you feel in the last two days?"], 
@@ -362,9 +382,9 @@ def handle_session_error():
     response.hangup()
     return Response(content=str(response), media_type="application/xml")
 
-# --- ML and Risk Helpers (Updated to work with dictionary output from DB) ---
-# ... (generate_synthetic_data, train_ml_model, clinical_ner_extract, get_contextual_questions, perform_nlp, predict_and_explain remain UNCHANGED) ...
+# --- ML and Risk Helpers (Remain largely unchanged, using patient_data dict) ---
 FEATURE_COLUMNS = ['age', 'prior_admissions_30d', 'comorbidity_score', 'adherence', 'sentiment_score_neg']
+
 def generate_synthetic_data(num_samples=200):
     np.random.seed(42)
     data = {
@@ -438,7 +458,8 @@ def predict_and_explain(patient_data):
     if GLOBAL_MODEL is None or GLOBAL_EXPLAINER is None:
         return 0.0, [{"feature": "System Error", "impact_score": 0.0}]
         
-    features = {col: [patient_data.get(col)] for col in FEATURE_COLUMNS}
+    # Ensure all required features are present and are floats/ints
+    features = {col: [patient_data.get(col, 0)] for col in FEATURE_COLUMNS}
     X_single = pd.DataFrame(features)
     readmission_prob = GLOBAL_MODEL.predict_proba(X_single)[:, 1][0]
     
@@ -506,6 +527,17 @@ def perform_nlp_and_risk_update(patient_id, symptoms_text, adherence_text):
 
 # --- 4) IVR Endpoints (Twilio Webhooks) ---
 
+def make_symptom_item(symptom_name):
+    symptom_name = symptom_name.lower().strip()
+    questions = CLINICAL_QUESTIONS.get(symptom_name, [f"Can you please tell us more about {symptom_name}?"])
+    return {"name": symptom_name, "questions": questions, "q_index": 0, "answer_log": []}
+    
+def enqueue_symptoms(state, symptoms_list):
+    existing_names = {item["name"] for item in state.get("symptoms", [])}
+    for symptom in symptoms_list:
+        if symptom not in existing_names:
+            state["symptoms"].append(make_symptom_item(symptom))
+
 @app.post("/twilio")
 async def twilio_webhook(request: Request, Caller: str = Form(None), CallSid: str = Form(None)):
     patient_id, patient = get_patient_context(Caller) # <--- DB CALL
@@ -535,20 +567,6 @@ async def process_initial_symptoms(request: Request, SpeechResult: str = Form(No
     patient_id = state['id']
     
     symptom_queue = get_contextual_questions(patient_id, symptoms_text)
-    
-    # ... (enqueue_symptoms definition omitted for brevity, assumed to be available)
-    # Re-define enqueue_symptoms locally for completeness if it's not global
-    def make_symptom_item(symptom_name):
-        symptom_name = symptom_name.lower().strip()
-        questions = CLINICAL_QUESTIONS.get(symptom_name, [f"Can you please tell us more about {symptom_name}?"])
-        return {"name": symptom_name, "questions": questions, "q_index": 0, "answer_log": []}
-        
-    def enqueue_symptoms(state, symptoms_list):
-        existing_names = {item["name"] for item in state.get("symptoms", [])}
-        for symptom in symptoms_list:
-            if symptom not in existing_names:
-                state["symptoms"].append(make_symptom_item(symptom))
-    
     enqueue_symptoms(state, symptom_queue)
     
     response = VoiceResponse()
