@@ -81,11 +81,6 @@ def render_main_dashboard(data, backend_url):
     df_display['Last Report'] = df_display['last_report'].apply(lambda x: x[:70] + '...' if len(x) > 70 else x)
     df_display['Last Call'] = df_display['last_call'].fillna("Never")
     
-    # Set risk color based on level
-    def style_risk_level(row):
-        color = get_risk_color(row['risk_level'])
-        return [f'background-color: {color}; color: white'] * len(row) if row['risk_level'] in ['High', 'Medium'] else [''] * len(row)
-
     # Display High/Medium Risk Patients first
     high_medium_risk = df_display[df_display['risk_level'].isin(['High', 'Medium'])]
     low_risk = df_display[df_display['risk_level'] == 'Low']
@@ -212,7 +207,7 @@ def render_new_patient_form(backend_url):
             age = st.number_input("Age", min_value=18, max_value=120, key="age")
         with col2:
             prior_admissions_30d = st.number_input("Prior Admissions (last 30 days)", min_value=0, key="prior_admissions_30d")
-            # --- FIX APPLIED HERE: max_value changed to 8 ---
+            # Corrected max_value to 8 for consistency with ML model
             comorbidity_score = st.number_input("**Comorbidity Score (1-8)**", min_value=1, max_value=8, key="comorbidity")
             
         discharge_diagnosis = st.text_area("Primary Discharge Diagnosis (e.g., CHF, COPD, Post-CABG)", key="diagnosis")
