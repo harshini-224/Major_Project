@@ -10,7 +10,7 @@ import os
 
 # --- 0) Configuration ---
 # Use environment variable if available (e.g., in Render deployment)
-BACKEND_BASE_URL = os.environ.get("BACKEND_URL_OVERRIDE", "https://ivr-clinical-backend.onrender.com")
+BACKEND_BASE_URL = os.environ.get("BACKEND_URL_OVERRIDE", "http://localhost:8000")
 
 # --- 1) API Functions ---
 def fetch_patient_summary():
@@ -41,12 +41,16 @@ if 'page' not in st.session_state:
 if 'selected_patient_id' not in st.session_state:
     st.session_state['selected_patient_id'] = None 
 
+# CRITICAL FIX: This function now serves as the button callback.
 def set_page_state(page_name, patient_id=None):
-    """Sets the page and selected patient ID, then reruns the app."""
+    """Sets the page and selected patient ID, then triggers a rerun."""
     st.session_state['page'] = page_name
     st.session_state['selected_patient_id'] = patient_id
+    # Clear confirmation state when changing pages
     if 'delete_confirm' in st.session_state:
-        del st.session_state['delete_confirm'] # Clear confirmation on switch
+        del st.session_state['delete_confirm'] 
+    
+    # NOTE: st.experimental_rerun() is now safer when called directly from a callback.
     st.experimental_rerun()
 
 # --- 3) Rendering Functions ---
@@ -88,6 +92,7 @@ def render_enrollment_page():
                 result = response.json()
                 st.success(f"✅ Patient {result['name']} enrolled successfully! ID: {result['patient_id']}")
                 st.balloons()
+                
             except requests.exceptions.RequestException as e:
                 try:
                     error_detail = response.json().get('detail', str(e))
@@ -103,8 +108,9 @@ def render_patient_details(patient_id):
     patient_data = fetch_patient_history(patient_id)
     if not patient_data:
         st.error(f"Could not load details for patient {patient_id}.")
-        if st.button("⬅️ Back to List"):
-            set_page_state('Dashboard')
+        # Use on_click callback for safer navigation
+        if st.button("⬅️ Back to List", on_click=set_page_state, args=('Dashboard',)):
+            pass 
         return
 
     st.session_state['patient_data'] = patient_data # Store for easy access
@@ -116,8 +122,8 @@ def render_patient_details(patient_id):
     col1, col2, col3, col4 = st.columns([1, 1.5, 1, 5]) 
 
     with col1:
-        if st.button("⬅️ Back to List"):
-            set_page_state('Dashboard')
+        # Use on_click callback for safer navigation
+        st.button("⬅️ Back to List", on_click=set_page_state, args=('Dashboard',))
             
     with col2:
         if st.button("🗑️ Delete Patient", type="primary"):
@@ -144,12 +150,13 @@ def render_patient_details(patient_id):
                     response.raise_for_status()
                     
                     st.success(f"Patient {patient_id} deleted successfully.")
-                    set_page_state('Dashboard') # Navigate back to the list
+                    # Navigate back to the list using the callback approach
+                    set_page_state('Dashboard') 
                     
                 except requests.exceptions.RequestException as e:
                     st.error(f"Error deleting patient: {e}")
                     st.session_state['delete_confirm'] = False
-        st.markdown("---") # Visual separation
+        st.markdown("---") 
 
     st.subheader("Historical Daily Reports")
     daily_data = pd.DataFrame(patient_data['daily_data_log'])
@@ -199,11 +206,17 @@ def render_main_dashboard():
     df['Risk'] = df.apply(lambda row: f"{row['risk_level']} ({row['risk_probability']:.1f}%)", axis=1)
     
     # Prepare the list for display
-    display_cols = ['id', 'name', 'Risk', 'last_report', 'last_call']
-    
     # Create an interactive table
     st.markdown("---")
     
+    # Display headers
+    col_id, col_name, col_risk, col_last_call, col_button = st.columns([1, 2, 1.5, 2, 1])
+    col_id.markdown("**ID**")
+    col_name.markdown("**Name**")
+    col_risk.markdown("**Risk**")
+    col_last_call.markdown("**Last Contact**")
+    col_button.markdown("**Actions**")
+
     # Display each patient with a button to view details
     for index, row in df.iterrows():
         col_id, col_name, col_risk, col_last_call, col_button = st.columns([1, 2, 1.5, 2, 1])
@@ -216,8 +229,14 @@ def render_main_dashboard():
         col_last_call.markdown(f"*{row['last_call'] or 'N/A'}*")
 
         with col_button:
-            if st.button("View Details", key=f"view_{row['id']}"):
-                set_page_state('Patient Details', row['id'])
+            # CRITICAL FIX: Use on_click callback for stable navigation
+            st.button(
+                "View Details", 
+                key=f"view_{row['id']}",
+                on_click=set_page_state,
+                args=('Patient Details', row['id'])
+            )
+            
     st.markdown("---")
     
     # --- Monitoring Job Control (Manual Call Trigger) ---
@@ -241,10 +260,13 @@ st.sidebar.markdown("---")
 page_selection = st.sidebar.radio(
     "Navigation",
     ("Dashboard", "Enroll New Patient"),
-    index=0 if st.session_state['page'] == 'Dashboard' else 1
+    # Set the index based on the current page in session state
+    index=0 if st.session_state['page'] in ('Dashboard', 'Patient Details') else 1
 )
 
-# CRITICAL: If the radio button changes the selection, reset the patient details view
+# CRITICAL: If the radio button changes the selection, switch the state immediately
+# Note: Since the radio button also triggers a change, we use set_page_state here
+# but the function itself now contains the rerun call.
 if page_selection != st.session_state['page']:
     set_page_state(page_selection) 
     
@@ -258,6 +280,6 @@ if st.session_state['page'] == 'Dashboard':
 elif st.session_state['page'] == 'Enroll New Patient':
     render_enrollment_page()
 
+# 'Patient Details' is not a sidebar option, but a view triggered by the Dashboard.
 elif st.session_state['selected_patient_id']:
     render_patient_details(st.session_state['selected_patient_id'])
-
