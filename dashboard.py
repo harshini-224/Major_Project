@@ -10,7 +10,7 @@ import os
 
 # --- 0) Configuration ---
 # Use environment variable if available (e.g., in Render deployment)
-BACKEND_BASE_URL = os.environ.get("BACKEND_URL_OVERRIDE", "https://ivr-clinical-backend.onrender.com")
+BACKEND_BASE_URL = os.environ.get("BACKEND_URL_OVERRIDE", "http://localhost:8000")
 
 # --- 1) API Functions ---
 def fetch_patient_summary():
@@ -41,7 +41,7 @@ if 'page' not in st.session_state:
 if 'selected_patient_id' not in st.session_state:
     st.session_state['selected_patient_id'] = None 
 
-# CRITICAL FIX: This function now serves as the button callback.
+# CRITICAL FIX: Replaced st.experimental_rerun() with the correct st.rerun()
 def set_page_state(page_name, patient_id=None):
     """Sets the page and selected patient ID, then triggers a rerun."""
     st.session_state['page'] = page_name
@@ -50,8 +50,7 @@ def set_page_state(page_name, patient_id=None):
     if 'delete_confirm' in st.session_state:
         del st.session_state['delete_confirm'] 
     
-    # NOTE: st.experimental_rerun() is now safer when called directly from a callback.
-    st.experimental_rerun()
+    st.rerun() # This is the corrected function call
 
 # --- 3) Rendering Functions ---
 
@@ -188,7 +187,7 @@ def render_main_dashboard():
     
     # Refresh button
     if st.button("🔄 Refresh Data"):
-        st.experimental_rerun()
+        st.rerun() # Changed to st.rerun()
         
     patient_summary = fetch_patient_summary()
     
@@ -229,7 +228,7 @@ def render_main_dashboard():
         col_last_call.markdown(f"*{row['last_call'] or 'N/A'}*")
 
         with col_button:
-            # CRITICAL FIX: Use on_click callback for stable navigation
+            # Use on_click callback for stable navigation
             st.button(
                 "View Details", 
                 key=f"view_{row['id']}",
@@ -265,8 +264,6 @@ page_selection = st.sidebar.radio(
 )
 
 # CRITICAL: If the radio button changes the selection, switch the state immediately
-# Note: Since the radio button also triggers a change, we use set_page_state here
-# but the function itself now contains the rerun call.
 if page_selection != st.session_state['page']:
     set_page_state(page_selection) 
     
@@ -283,4 +280,3 @@ elif st.session_state['page'] == 'Enroll New Patient':
 # 'Patient Details' is not a sidebar option, but a view triggered by the Dashboard.
 elif st.session_state['selected_patient_id']:
     render_patient_details(st.session_state['selected_patient_id'])
-
