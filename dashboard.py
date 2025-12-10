@@ -10,7 +10,7 @@ import os
 
 # --- 0) Configuration ---
 # Use environment variable if available (e.g., in Render deployment)
-BACKEND_BASE_URL = os.environ.get("BACKEND_URL_OVERRIDE", "http://localhost:8000")
+BACKEND_BASE_URL = os.environ.get("BACKEND_URL_OVERRIDE", "https://ivr-clinical-backend.onrender.com")
 
 # --- 1) API Functions ---
 def fetch_patient_summary():
@@ -283,3 +283,4 @@ elif st.session_state['page'] == 'Enroll New Patient':
 # 'Patient Details' is not a sidebar option, but a view triggered by the Dashboard.
 elif st.session_state['selected_patient_id']:
     render_patient_details(st.session_state['selected_patient_id'])
+
