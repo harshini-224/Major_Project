@@ -11,7 +11,7 @@ import time
 
 # --- Configuration ---
 # Set the initial backend URL. This will be updated by /get_public_url
-BACKEND_BASE_URL = os.environ.get("BACKEND_URL_OVERRIDE", "http://localhost:8000")
+BACKEND_BASE_URL = os.environ.get("BACKEND_URL_OVERRIDE", "https://ivr-clinical-backend.onrender.com")
 
 # --- Helper Functions ---
 @st.cache_data(ttl=5) # Cache data for 5 seconds
@@ -301,3 +301,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
