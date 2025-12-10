@@ -524,4 +524,3 @@ async def get_public_url_api():
          raise HTTPException(status_code=503, detail="Public URL is not ready. Check deployment or Ngrok status.")
     return {"public_url": PUBLIC_URL}
 
-
