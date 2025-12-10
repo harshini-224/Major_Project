@@ -1,13 +1,14 @@
 fastapi
 uvicorn[standard]
+streamlit
+twilio
+pyngrok
 apscheduler
+pytz
 requests
 pandas
 numpy
 xgboost
-scikit-learn
 shap
-pytz
-twilio
-python-multipart
+
 
