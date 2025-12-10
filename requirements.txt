@@ -10,5 +10,6 @@ pandas
 numpy
 xgboost
 shap
+python-multipart
 
 
