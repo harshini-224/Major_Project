@@ -4,15 +4,16 @@ import pandas as pd
 import json
 from datetime import datetime
 import re
+from typing import Optional, Dict, Any
 
 # --- CONFIGURATION ---
 # CRITICAL: Replace this placeholder with your actual Render FastAPI service URL
 # Example: "https://ivr-clinical-backend.onrender.com"
-FASTAPI_BASE_URL = "https://ivr-clinical-backend.onrender.com"
+FASTAPI_BASE_URL: str = "https://ivr-clinical-backend.onrender.com" # <<<--- UPDATE THIS URL
 
 # --- HELPER FUNCTIONS ---
 
-def fetch_data(endpoint):
+def fetch_data(endpoint: str) -> Optional[Dict[str, Any]]:
     """Fetches data from the FastAPI backend."""
     url = f"{FASTAPI_BASE_URL}{endpoint}"
     try:
@@ -20,26 +21,40 @@ def fetch_data(endpoint):
         response.raise_for_status()  # Raises HTTPError for bad responses (4xx or 5xx)
         return response.json()
     except requests.exceptions.RequestException as e:
-        st.error(f"Error connecting to backend at {url}: {e}")
+        st.error(f"Error connecting to backend at {url}. Ensure the Render service is running and the URL is correct.")
         return None
 
-def post_data(endpoint, data):
-    """Posts data to the FastAPI backend."""
+def post_data(endpoint: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Posts form-data to the FastAPI backend and handles non-JSON errors gracefully."""
     url = f"{FASTAPI_BASE_URL}{endpoint}"
     try:
-        # Use data=data for form-data, which matches how the FastAPI endpoint is configured
+        # FastAPI's endpoint uses Form(...), so we use data=data for form-data encoding
         response = requests.post(url, data=data) 
-        response.raise_for_status()
+        response.raise_for_status() # Raises HTTPError for 4xx or 5xx status codes
         return response.json()
+        
     except requests.exceptions.HTTPError as e:
-        st.error(f"Enrollment Failed: {e.response.json().get('detail', 'Unknown error')}")
+        # --- CORRECTED ERROR HANDLING ---
+        status_code = e.response.status_code
+        detail_message = f"HTTP Status Code: {status_code}. "
+        
+        try:
+            # Attempt to decode JSON detail (works for 400 Bad Request/Validation errors)
+            detail_message += e.response.json().get('detail', 'Unknown error from API.')
+        except requests.exceptions.JSONDecodeError:
+            # Fallback for 500 Internal Server Errors where the backend returns non-JSON/HTML
+            detail_message += "Backend returned a non-JSON error response. **CRITICAL: Check your Render FastAPI Backend Logs for the full 500 Server Error traceback!**"
+            
+        st.error(f"Enrollment Failed: {detail_message}")
         return None
+        # --- END CORRECTED ERROR HANDLING ---
+        
     except requests.exceptions.RequestException as e:
-        st.error(f"Error connecting to backend: {e}")
+        st.error(f"Network or connection error to backend: {e}")
         return None
 
-def normalize_phone_number(phone):
-    """Normalizes a phone number string to E.164 format (+91XXXXXXXXXX) for display."""
+def normalize_phone_number(phone: str) -> str:
+    """Normalizes a phone number string to E.164 format (+91XXXXXXXXXX)."""
     clean_phone = re.sub(r'[^\d+]', '', phone)
     if clean_phone.startswith('+91') and len(clean_phone) == 13: 
         return clean_phone
@@ -52,7 +67,7 @@ def normalize_phone_number(phone):
 def render_enrollment_tab():
     """Renders the patient enrollment form."""
     st.header("➕ New Patient Enrollment")
-    st.warning("Please ensure the phone number is a valid 10-digit Indian number.")
+    st.warning("Please ensure the phone number is a valid 10-digit Indian number for Twilio calls.")
 
     with st.form("enrollment_form"):
         # --- PATIENT INFO ---
@@ -60,7 +75,6 @@ def render_enrollment_tab():
         col1, col2 = st.columns(2)
         
         name = col1.text_input("Full Name", key="name_input")
-        # Ensure phone number is collected as text and then normalized
         phone_input = col2.text_input("Phone Number (10 digits, e.g., 9876543210)", key="phone_input")
         
         col3, col4 = st.columns(2)
@@ -120,7 +134,9 @@ def render_enrollment_tab():
                 st.session_state["diag_input"] = ""
                 st.session_state["meds_input"] = ""
             elif response:
-                 st.error(f"Enrollment failed with message: {response.get('message', 'Unknown API Error')}")
+                 # This block handles successful JSON errors (e.g., 400 Bad Request)
+                 # The post_data function already displays the error message.
+                 pass
 
 def render_dashboard_tab():
     """Renders the patient monitoring dashboard."""
@@ -130,8 +146,14 @@ def render_dashboard_tab():
     col_btn, col_spacer = st.columns([1, 4])
     if col_btn.button("🔄 Refresh Data & Trigger Manual Call Job"):
         with st.spinner("Triggering manual call job on backend..."):
-            requests.post(f"{FASTAPI_BASE_URL}/call_patients_job_manual")
-        st.success("Manual call job triggered (will only call patients not at High Risk). Refreshing dashboard...")
+            try:
+                # Manual trigger uses a POST request
+                response = requests.post(f"{FASTAPI_BASE_URL}/call_patients_job_manual")
+                response.raise_for_status()
+                st.success(f"Manual call job triggered (will only call {response.json().get('count', 0)} patients). Refreshing dashboard...")
+            except requests.exceptions.RequestException as e:
+                st.error(f"Failed to trigger call job: {e}")
+                
         st.cache_data.clear() # Clear cache to force refresh
 
     data = fetch_data("/api/patients/all_summary")
@@ -144,7 +166,7 @@ def render_dashboard_tab():
         
         # Format the DataFrame for better display
         df['Risk (%)'] = (df['risk_probability']).round(1).astype(str) + '%'
-        df['Last Report'] = df['last_report'].apply(lambda x: x[:70] + "..." if len(x) > 70 else x)
+        df['Last Report'] = df['symptom_report'].apply(lambda x: x[:70] + "..." if len(x) > 70 else x)
         
         # Determine the table color based on risk level
         def highlight_risk(s):
@@ -209,30 +231,37 @@ def render_dashboard_tab():
                 else:
                     st.info("No active intervention override.")
                     
-                with st.form("intervention_form", clear_on_submit=True):
+                with st.form("intervention_form"):
                     notes = st.text_area("Intervention Notes (e.g., 'Called patient, increased Furosemide dose.')", key="intervention_notes_input")
                     override_toggle = st.checkbox("Set 'Doctor Override' to True (Pauses daily automated call)", value=selected_patient['doctor_override'])
                     
                     col_log, col_clear = st.columns(2)
                     
                     if col_log.form_submit_button("Log Intervention & Override"):
-                        if notes:
-                            # 1. Log Intervention Notes
-                            update_notes = requests.post(
+                        try:
+                            # 1. Log Intervention Notes (POST request with JSON body)
+                            update_notes_response = requests.post(
                                 f"{FASTAPI_BASE_URL}/api/patients/intervene/{selected_id}",
                                 json={"notes": notes}
                             )
-                            update_notes.raise_for_status()
+                            update_notes_response.raise_for_status()
                             
-                            # 2. Update Doctor Override Flag (PATCH request)
-                            update_override = requests.patch(
+                            # 2. Update Doctor Override Flag (PATCH request with JSON body)
+                            update_override_response = requests.patch(
                                 f"{FASTAPI_BASE_URL}/api/patients/update/{selected_id}",
                                 json={"doctor_override": override_toggle}
                             )
-                            update_override.raise_for_status()
+                            update_override_response.raise_for_status()
                             
                             st.success("Intervention and Override status updated successfully! Click refresh to view changes.")
                             st.cache_data.clear()
+                            st.rerun() # Rerun to refresh the UI immediately
+                            
+                        except requests.exceptions.HTTPError as e:
+                            st.error(f"Intervention Failed: HTTP {e.response.status_code}. Detail: {e.response.json().get('detail', 'Check Backend Logs')}")
+                        except requests.exceptions.RequestException as e:
+                            st.error(f"Network error during intervention log: {e}")
+
 
                 # --- Daily Log ---
                 st.markdown("#### Daily Monitoring Log")
@@ -260,7 +289,7 @@ st.set_page_config(
 # Sidebar
 st.sidebar.title("IVR Monitoring System")
 st.sidebar.markdown(f"**Backend:** `{FASTAPI_BASE_URL}`")
-st.sidebar.caption("Ensure the backend service is running on Render.")
+st.sidebar.caption("Ensure the backend service is running on Render and this URL is correct.")
 
 # Tabs
 tab1, tab2 = st.tabs(["🏥 Monitoring Dashboard", "➕ Patient Enrollment"])
