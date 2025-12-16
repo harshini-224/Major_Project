@@ -15,7 +15,6 @@ FASTAPI_BASE_URL = "https://ivr-clinical-backend.onrender.com"
 # --- Helper Functions ---
 
 def safe_date_format(date_str):
-    """Safely converts an ISO date string (potentially with None/NaN) to a display format."""
     if not date_str or pd.isna(date_str) or str(date_str).lower() in ['never', 'none', 'nan']:
         return 'Never'
     
@@ -32,7 +31,6 @@ def safe_date_format(date_str):
 
 @st.cache_data(ttl=5) 
 def fetch_patient_summary():
-    """Fetches the main patient summary data from the FastAPI backend."""
     try:
         response = requests.get(f"{FASTAPI_BASE_URL}/api/patients/all_summary")
         response.raise_for_status() 
@@ -42,7 +40,6 @@ def fetch_patient_summary():
         return None
 
 def fetch_patient_history(patient_id):
-    """Fetches detailed historical data for a single patient."""
     try:
         response = requests.get(f"{FASTAPI_BASE_URL}/api/patients/{patient_id}/history")
         response.raise_for_status()
@@ -52,7 +49,6 @@ def fetch_patient_history(patient_id):
         return None
 
 def log_intervention(patient_id, notes):
-    """Posts a doctor's intervention note to the backend."""
     try:
         headers = {"Content-Type": "application/json"}
         response = requests.post(f"{FASTAPI_BASE_URL}/api/patients/intervene/{patient_id}", 
@@ -64,7 +60,7 @@ def log_intervention(patient_id, notes):
         st.error(f"Error logging intervention: {e}")
         return None
 
-# --- UI Components (Same as previous version) ---
+# --- UI Components ---
 
 def render_alert_monitor(patient_data):
     st.header("🚨 Patient Tracking & Alert Monitor")
@@ -73,7 +69,7 @@ def render_alert_monitor(patient_data):
         st.stop()
     
     if not patient_data:
-        st.info("No patients enrolled in the system yet. Use 'Enroll New Patient' to begin.")
+        st.info("No patients enrolled in the system yet. Use 'Enroll New Patient' to begin, or use the FastAPI endpoint directly.")
         return
 
     df = pd.DataFrame(patient_data)
@@ -153,8 +149,8 @@ def render_alert_monitor(patient_data):
 
 
 def render_new_patient_form():
-    st.header("➕ Enroll New Patient")
-    st.markdown("Enter the patient's discharge information to begin daily monitoring.")
+    st.header("➕ Enroll New Patient (Dashboard Entry)")
+    st.markdown("Use this form to quickly enroll a patient using the FastAPI API.")
 
     with st.form("new_patient_form"):
         col1, col2, col3 = st.columns(3)
@@ -233,4 +229,3 @@ elif page == "Enroll New Patient":
 # Always show the backend connection status at the bottom (for debugging)
 st.sidebar.markdown("---")
 st.sidebar.caption(f"FastAPI Backend Target: {FASTAPI_BASE_URL}")
-
