@@ -10,7 +10,7 @@ import os
 # --- Configuration: RENDER URL ---
 # CRITICAL: Replace this placeholder with your actual Render service URL 
 # (e.g., https://my-ivr-backend.onrender.com)
-FASTAPI_BASE_URL = "https://YOUR_FASTAPI_RENDER_URL.onrender.com" 
+FASTAPI_BASE_URL = "https://ivr-clinical-backend.onrender.com" 
 
 # --- Helper Functions ---
 
@@ -233,3 +233,4 @@ elif page == "Enroll New Patient":
 # Always show the backend connection status at the bottom (for debugging)
 st.sidebar.markdown("---")
 st.sidebar.caption(f"FastAPI Backend Target: {FASTAPI_BASE_URL}")
+
