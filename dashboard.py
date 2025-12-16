@@ -9,7 +9,7 @@ from typing import Optional, Dict, Any
 # --- CONFIGURATION ---
 # CRITICAL: Replace this placeholder with your actual Render FastAPI service URL
 # Example: "https://ivr-clinical-backend.onrender.com"
-FASTAPI_BASE_URL: "https://ivr-clinical-backend.onrender.com" # <<<--- UPDATE THIS URL
+FASTAPI_BASE_URL: str = "https://ivr-clinical-backend.onrender.com"  # <<<--- UPDATE THIS URL
 
 # --- HELPER FUNCTIONS ---
 
@@ -299,4 +299,5 @@ with tab1:
 
 with tab2:
     render_enrollment_tab()
+
 
