@@ -11,5 +11,8 @@ numpy
 xgboost
 shap
 python-multipart
+sqlmodel
+psycopg2-binary 
+pydantic
 
 
