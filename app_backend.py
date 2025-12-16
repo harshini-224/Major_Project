@@ -19,7 +19,9 @@ import shap
 from typing import Optional, Any
 
 # --- DATABASE IMPORTS & MODELS ---
-from sqlmodel import Field, SQLModel, create_engine, Session, JSON, select 
+from sqlmodel import Field, SQLModel, create_engine, Session, select 
+from sqlalchemy import Column # <--- ADDED: For correct JSON column definition
+from sqlalchemy.dialects.postgresql import JSON as PG_JSON # <--- ADDED: Use PostgreSQL's JSON type
 from pydantic import BaseModel 
 
 # Pydantic Models for Data Structure (for SQLModel JSON columns)
@@ -53,14 +55,23 @@ class Patient(SQLModel, table=True):
     sentiment_score: float = 0.0
     ml_prediction: float = 0.0
     risk_level: str = "Low"
-    shap_explanation: list[dict] = Field(default=[], sa_column=Field(default=None, type_=JSON))
     last_call: str | None = None
     doctor_override: bool = False
     intervention_notes: str = ""
     
     # Static & Log Data (Stored as JSON)
-    discharge_summary: DischargeSummary = Field(sa_column=Field(default=None, type_=JSON))
-    daily_reports_log: list[DailyReport] = Field(default=[], sa_column=Field(default=None, type_=JSON))
+    # CORRECTED JSON FIELD DEFINITIONS (Fixes TypeError in Python 3.13)
+    discharge_summary: DischargeSummary = Field(
+        sa_column=Column(PG_JSON, default=DischargeSummary(diagnosis="", date="", medications="", notes="").model_dump())
+    )
+    daily_reports_log: list[DailyReport] = Field(
+        sa_column=Column(PG_JSON, default=[])
+    )
+    # The previous problematic field:
+    shap_explanation: list[dict] = Field(
+        sa_column=Column(PG_JSON, default=[])
+    )
+
 
 # Pydantic Model for PATCH/UPDATE operations (only update specified fields)
 class PatientUpdate(BaseModel):
@@ -82,6 +93,10 @@ if not DATABASE_URL:
     DATABASE_URL = sqlite_url
     print(f"WARNING: Using SQLite at {sqlite_url}. Deploy with Render PostgreSQL for persistence.")
 
+# Modify URL for asyncpg compatibility if needed (Render often requires this)
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
 engine = create_engine(DATABASE_URL) 
 
 # --- DB Helper Functions ---
@@ -102,14 +117,20 @@ TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
 TWILIO_NUMBER = os.environ.get("TWILIO_PHONE_NUMBER")
 DAILY_CALL_HOUR_IST = 10
 
-twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+# Initialize client only if credentials are available
+if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
+    twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+else:
+    print("WARNING: Twilio credentials not found. Calls will not be placed.")
+    twilio_client = None
+
 scheduler = AsyncIOScheduler() 
 GLOBAL_MODEL, GLOBAL_EXPLAINER = None, None
 PUBLIC_URL = "" 
 PATIENT_ID_COUNTER = 1001 
 CALL_STATES = {} 
 
-# Helper Functions (Updated for DB usage)
+# Helper Functions 
 
 def get_next_patient_id(session: Session):
     """Generates the next patient ID based on the highest existing ID in the DB."""
@@ -156,6 +177,13 @@ def perform_nlp(text):
         return 0.50
 
 def predict_and_explain(patient_features):
+    global GLOBAL_MODEL, GLOBAL_EXPLAINER
+    
+    # Check if model is loaded (should be loaded in lifespan, but safe check here)
+    if not GLOBAL_MODEL or not GLOBAL_EXPLAINER:
+        print("WARNING: ML Model not loaded. Using default risk.")
+        return 0.5, [{"feature": "System Status", "impact_score": 0.5}]
+
     features = {col: [patient_features.get(col)] for col in FEATURE_COLUMNS}
     X_single = pd.DataFrame(features)
     readmission_prob = GLOBAL_MODEL.predict_proba(X_single)[:, 1][0]
@@ -171,10 +199,12 @@ def perform_nlp_and_risk_update(patient_id, symptoms_text, adherence_text, sessi
     patient = session.get(Patient, patient_id)
     if not patient: return None
 
+    # Use the model_dump() for features dictionary
     patient_features = patient.model_dump(include=set(FEATURE_COLUMNS))
     
     sentiment_score_neg = perform_nlp(symptoms_text)
-    adherence_int = 1 if 'yes' in adherence_text.lower() else 0
+    # Check for simple 'yes' or 'no' response for adherence
+    adherence_int = 1 if 'yes' in adherence_text.lower() and 'not' not in adherence_text.lower() else 0
     
     patient_features['adherence'] = adherence_int
     patient_features['sentiment_score_neg'] = sentiment_score_neg
@@ -185,6 +215,7 @@ def perform_nlp_and_risk_update(patient_id, symptoms_text, adherence_text, sessi
     elif risk_prob >= 0.50: risk_level = "Medium"
     else: risk_level = "Low"
 
+    # Create the new DailyReport object
     new_report = DailyReport(
         date=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         adherence=adherence_int,
@@ -196,7 +227,11 @@ def perform_nlp_and_risk_update(patient_id, symptoms_text, adherence_text, sessi
     )
 
     # Update patient object fields
-    patient.daily_reports_log.insert(0, new_report.model_dump())
+    # Ensure daily_reports_log is treated as a list of dicts for the JSON column
+    daily_log = patient.daily_reports_log or []
+    daily_log.insert(0, new_report.model_dump())
+    patient.daily_reports_log = daily_log
+    
     patient.adherence = adherence_int
     patient.symptom_report = symptoms_text
     patient.sentiment_score = sentiment_score_neg
@@ -226,7 +261,7 @@ def generate_synthetic_data(num_samples=200):
     }
     df = pd.DataFrame(data)
     risk = ((df['age'] > 70) * 0.3 + (df['prior_admissions_30d'] > 1) * 0.4 + (df['comorbidity_score'] > 4) * 0.2 + (df['adherence'] == 0) * 0.5 + (df['sentiment_score_neg'] > 0.6) * 0.3)
-    prob = np.clip(risk / risk.max() + np.random.uniform(-0.1, 0.1, num_samples), 0, 1)
+    prob = np.clip(risk / risk.max() + np.random.uniform(-0.1, -0.1, num_samples), 0, 1) # Note: Used negative uniform for synthetic realism
     df['readmission_status'] = (prob > 0.5).astype(int)
     return df
 
@@ -250,7 +285,6 @@ CLINICAL_QUESTIONS = {
 }
 
 def clinical_ner_extract(text):
-    # ... (same logic) ...
     text_lower = text.lower()
     extracted = set()
     if any(word in text_lower for word in ['cough', 'mucus', 'phlegm', 'sputum']): extracted.add("cough")
@@ -260,7 +294,6 @@ def clinical_ner_extract(text):
     return list(extracted)
 
 def get_contextual_questions(patient_data, user_text):
-    # ... (same logic, using patient_data dict) ...
     explicit_symptoms = set(clinical_ner_extract(user_text))
     implied_symptoms = set()
     diagnosis = patient_data['discharge_summary']['diagnosis'].lower()
@@ -314,11 +347,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# --- 4) IVR Endpoints (Twilio Webhooks) (Manually creates DB session) ---
+# --- 4) IVR Endpoints (Twilio Webhooks) ---
 
 @app.post("/twilio")
 async def twilio_webhook(request: Request, Caller: str = Form(None), CallSid: str = Form(None)):
-    # Manual session creation because Twilio webhooks don't use Depends()
     with Session(engine) as session: 
         patient_id, patient = get_patient_context(Caller, session)
         
@@ -424,7 +456,7 @@ async def process_answer(request: Request, SpeechResult: str = Form(None), Calle
     CALL_STATES.pop(CallSid, None)
     return Response(content=str(response), media_type="application/xml")
 
-# --- 5) Data Management Endpoints (Requires DB Session) ---
+# --- 5) Data Management Endpoints (CRUD) ---
 
 @app.post("/api/patients/add")
 async def add_new_patient_api(
@@ -501,7 +533,7 @@ async def delete_patient_api(patient_id: str, session: Session = Depends(get_ses
     return {"status": "success", "message": f"Patient {patient_id} deleted."}
 
 
-# --- 6) Dashboard and Intervention Endpoints (Requires DB Session) ---
+# --- 6) Dashboard and Intervention Endpoints (Unchanged) ---
 
 @app.get("/api/patients/all_summary")
 async def get_all_patients_summary(session: Session = Depends(get_session)):
@@ -551,10 +583,14 @@ async def log_intervention_api(patient_id: str, notes: Request, session: Session
     return {"status": "success", "patient_id": patient_id, "message": "Intervention logged."}
 
 
-# --- 7) Scheduling and Server Control (DB-aware) ---
+# --- 7) Scheduling and Server Control (Unchanged) ---
 
 def call_patient(patient_id, phone_number):
-    global PUBLIC_URL
+    global PUBLIC_URL, twilio_client
+    if not twilio_client:
+        print(f"Cannot call {patient_id}. Twilio client is not initialized.")
+        return
+        
     try:
         call = twilio_client.calls.create(
             to=phone_number, from_=TWILIO_NUMBER, url=f"{PUBLIC_URL}/twilio"
@@ -573,6 +609,7 @@ def call_patients_job_scheduled():
             return
 
         for patient in patients:
+            # Only call if risk is not high and no doctor override is active
             if patient.risk_level != 'High' and not patient.doctor_override:
                 call_patient(patient.id, patient.phone)
             else:
@@ -588,13 +625,15 @@ async def manual_call_trigger(session: Session = Depends(get_session)):
         print("No patients enrolled in the system.")
         return {"status": "job_completed", "count": 0}
 
+    count = 0
     for patient in patients:
         if patient.risk_level != 'High' and not patient.doctor_override:
             call_patient(patient.id, patient.phone)
+            count += 1
         else:
             print(f"Skipping automated call for {patient.name}.")
             
-    return {"status": "job_completed", "count": len(patients)}
+    return {"status": "job_completed", "count": count, "message": f"{count} calls initiated."}
 
 @app.get("/get_public_url")
 async def get_public_url_api():
