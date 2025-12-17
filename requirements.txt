@@ -1,18 +1,49 @@
-fastapi
-uvicorn[standard]
-streamlit
-twilio
-pyngrok
-apscheduler
-pytz
-requests
-pandas
-numpy
-xgboost
-shap
-python-multipart
-sqlmodel
-psycopg2-binary 
-pydantic
+# =========================
+# Core Backend
+# =========================
+fastapi==0.110.0
+uvicorn[standard]==0.29.0
+python-multipart==0.0.9
+pydantic==2.6.4
+
+# =========================
+# Frontend
+# =========================
+streamlit==1.35.0
+
+# =========================
+# Database
+# =========================
+sqlmodel==0.0.16
+psycopg2-binary==2.9.9
+
+# =========================
+# Scheduling / Utilities
+# =========================
+apscheduler==3.10.4
+pytz==2024.1
+requests==2.31.0
+pyngrok==7.1.6
+
+# =========================
+# NLP / NER
+# =========================
+spacy==3.7.4
+numpy==1.26.4
+pandas==2.2.2
+scikit-learn==1.4.2
+
+# =========================
+# ML / Risk Model
+# =========================
+xgboost==2.0.3
+shap==0.45.1
+
+# =========================
+# Telephony
+# =========================
+twilio==9.0.4
+
+
 
 
